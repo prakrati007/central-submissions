@@ -68,30 +68,428 @@ Users configure an interview session by selecting a subject, difficulty, and Blo
 
 ## Repository Structure
 
+The repository is split into four top-level folders, each owned by a different team. Every folder is a self-contained Python package or Node project.
+
 ```
 central-submissions/
-├── frontend/               # React frontend application
-│   └── src/
-│       ├── pages/          # InterviewConfig, InterviewScreen, LoginPage, etc.
-│       ├── components/     # QuestionCard, ProtectedRoute
-│       ├── hooks/          # useAuth, useInterview
-│       ├── api/            # api.js — Axios proxy layer
-│       └── context/        # AuthContext
-├── backend/                # FastAPI backend application
-│   └── app/
-│       ├── api/routes/     # HTTP route definitions
-│       ├── controllers/    # Request orchestration layer
-│       ├── services/       # Business logic
-│       ├── repositories/   # Database query layer
-│       ├── models/         # SQLAlchemy ORM models
-│       ├── schemas/        # Pydantic request/response schemas
-│       ├── core/           # Auth, security, config, rate-limiting
-│       └── db/             # Session and base setup
-├── ai/                     # AI team module (READ ONLY)
-│   └── ...
-└── docs/                   # Shared documentation
-    ├── API.md
-    └── interview-flow.md
+├── frontend/               # React (Vite) single-page application
+├── backend/                # FastAPI REST API server
+├── ai/                     # AI services module (Groq + Pinecone)
+└── database/               # SQLAlchemy models, repositories, and Alembic migrations
+```
+
+---
+
+### `frontend/` — React SPA
+
+The user-facing application built with React + Vite.
+
+```
+frontend/
+├── index.html                  # Vite HTML entry point
+├── vite.config.js              # Vite bundler configuration
+├── package.json                # npm dependencies and scripts
+├── eslint.config.js            # ESLint rules
+├── .env                        # Frontend environment variables (VITE_GOOGLE_CLIENT_ID)
+└── src/
+    ├── main.jsx                # React tree root — renders <App /> into the DOM
+    ├── App.jsx                 # Router root — defines all client-side routes:
+    │                           #   /          → LoginPage
+    │                           #   /signup    → SignupPage
+    │                           #   /config    → InterviewConfig  (protected)
+    │                           #   /interview → InterviewScreen  (protected)
+    ├── App.css / index.css     # Global and component-level styles (Tailwind base)
+    │
+    ├── pages/                  # Full-screen page components
+    │   ├── LoginPage.jsx       # Email/password login form + Google OAuth button
+    │   ├── SignupPage.jsx       # New-account registration form
+    │   ├── InterviewConfig.jsx # Pre-interview setup form (subject, difficulty,
+    │   │                       #   Bloom level, question count); calls POST /interview/start
+    │   └── InterviewScreen.jsx # Live interview UI — shows one question at a time,
+    │                           #   accepts typed answers, and displays the final results
+    │                           #   panel with score ring, performance level, and breakdown
+    │
+    ├── Components/             # Shared, reusable UI components
+    │   ├── ProtectedRoute.jsx  # HOC that redirects unauthenticated users to /
+    │   └── QuestionCard.jsx    # Renders a single interview question with its timer
+    │
+    ├── hooks/                  # Custom React hooks (stateful logic, no JSX)
+    │   ├── useAuth.js          # Convenience wrapper — reads user/token from AuthContext
+    │   └── useInterview.js     # Full interview state machine:
+    │                           #   start(), fetchNextQuestion(), answer(),
+    │                           #   fetchSummary(), fetchResult(), reset()
+    │
+    ├── api/
+    │   └── api.js              # Central Axios client (baseURL = http://127.0.0.1:8000/api/v1)
+    │                           # Intercepts every request to attach Authorization: Bearer <token>
+    │                           # Intercepts 401 responses to clear storage and redirect to /
+    │                           # Exports: signup, login, googleAuth,
+    │                           #          startInterview, getNextQuestion,
+    │                           #          submitAnswer, getSummary, getResult
+    │
+    ├── context/
+    │   └── AuthContext.jsx     # React Context that holds user, token, loading, error
+    │                           # Persists token to localStorage across page reloads
+    │                           # Exposes: login(), signup(), googleAuth(), logout()
+    │
+    └── assets/                 # Static images (logo.png, bg.png, react.svg)
+```
+
+---
+
+### `backend/` — FastAPI Server
+
+The Python REST API. Follows a strict four-layer architecture:
+**Route → Controller → Service → Repository**.
+
+```
+backend/
+├── requirements.txt            # Python dependencies
+├── .env.example                # Template for environment variables
+├── test_ai.py                  # Manual smoke test for the AI module
+├── tests/                      # Pytest test suite (package)
+├── docs/
+│   └── API.md                  # Detailed HTTP contract reference
+└── app/
+    ├── main.py                 # FastAPI app factory:
+    │                           #   • Creates the FastAPI app instance
+    │                           #   • Registers CORS middleware (localhost:3000 / 5173)
+    │                           #   • Attaches SlowAPI rate-limit middleware
+    │                           #   • Registers the global validation error handler
+    │                           #   • Mounts api_router under /api/v1
+    │                           #   • Runs Base.metadata.create_all() on startup
+    │
+    ├── api/
+    │   ├── router.py           # Aggregates all sub-routers into one APIRouter:
+    │   │                       #   /auth       → auth_routes
+    │   │                       #   /interview  → interview_routes
+    │   │                       #   /users      → user_routes
+    │   ├── routes/             # HTTP layer only — no business logic
+    │   │   ├── auth_routes.py      # POST /signup, POST /login, POST /google
+    │   │   ├── interview_routes.py # POST /start, GET /{id}/next,
+    │   │   │                       # POST /{id}/answer, GET /{id}/summary,
+    │   │   │                       # GET /{id}/result
+    │   │   └── user_routes.py      # GET /users/me  (profile endpoints)
+    │   └── v1/                 # Reserved namespace for future API versioning
+    │
+    ├── controllers/            # Orchestration layer — calls a service, wraps result
+    │   ├── auth_controller.py      # handle_signup / handle_login / handle_google_login
+    │   ├── interview_controller.py # handle_start_interview / handle_get_next_question /
+    │   │                           # handle_submit_answer / handle_get_summary / handle_get_result
+    │   └── user_controller.py      # handle_get_me
+    │
+    ├── services/               # Business logic — validation, orchestration, AI calls
+    │   ├── auth_service.py         # signup: hash password, create user, issue JWT
+    │   │                           # login: verify password, issue JWT
+    │   │                           # google_login: verify Google ID token, upsert user, issue JWT
+    │   ├── interview_service.py    # start_interview: create session → call AI → persist questions
+    │   │                           # get_next_question: find first unanswered InterviewQuestion
+    │   │                           # submit_answer: save answer, auto-complete session if last
+    │   │                           # get_summary: batch-evaluate all answers via AI, return breakdown
+    │   │                           # get_result: return simple score/total/percentage
+    │   └── user_service.py         # get_current_user_profile
+    │
+    ├── schemas/                # Pydantic models for request/response validation
+    │   ├── auth_schema.py          # SignupRequest, LoginRequest, GoogleLoginRequest
+    │   ├── interview_schema.py     # InterviewStartRequest, SubmitAnswerRequest
+    │   ├── interview.py            # Shared interview response shapes
+    │   ├── user_schema.py          # UserResponse
+    │   └── user.py                 # Shared user shapes
+    │
+    ├── core/                   # Cross-cutting concerns
+    │   ├── config.py           # Settings loaded from .env via Pydantic BaseSettings
+    │   │                       #   (PROJECT_NAME, DATABASE_URL, SECRET_KEY, etc.)
+    │   ├── security.py         # Password hashing (bcrypt) and JWT creation/decoding
+    │   ├── dependencies.py     # get_current_user() — FastAPI Dependency that decodes
+    │   │                       #   the Bearer token and returns the user_id (int)
+    │   ├── auth.py             # Backward-compat shim — re-exports get_current_user
+    │   ├── google_auth.py      # Verifies Google ID tokens via google-auth library
+    │   ├── rate_limit.py       # Shared SlowAPI Limiter instance (key = client IP)
+    │   ├── logging.py          # Configures structured JSON logging at app startup
+    │   └── responses.py        # Typed response model helpers
+    │
+    └── utils/
+        └── response.py         # success_response(data) — wraps any payload in the
+                                #   standard { success, data } envelope
+```
+
+---
+
+### `ai/` — AI Services Module
+
+An independent Python package. The backend imports from here; it has no knowledge of FastAPI or SQLAlchemy.
+
+```
+ai/
+├── __init__.py
+├── config.py               # AISettings — reads GROQ_API_KEY and PINECONE_API_KEY
+│                           # from backend/.env (or project-root .env) via pydantic-settings
+├── schemas/
+│   └── ai_schema.py        # Pydantic models for AI input/output shapes
+└── services/
+    ├── llm_service.py          # Thin wrapper around the Groq SDK — sends a chat
+    │                           # completion request to llama-3.3-70b-versatile and
+    │                           # returns the raw text response
+    ├── question_generator.py   # generate_questions(payload, student_id):
+    │                           #   1. Queries Pinecone for the student's past interactions
+    │                           #   2. Builds a system + user prompt including subject,
+    │                           #      difficulty, Bloom level, and memory context
+    │                           #   3. Calls Groq to get a JSON list of questions
+    │                           #   4. Upserts each question into Pinecone memory
+    ├── check_answers.py        # check_answer_correctness(question, answer, student_id):
+    │                           #   1. Queries Pinecone for related memory
+    │                           #   2. Sends question + answer to Groq for evaluation
+    │                           #   3. Parses the JSON score (0-100), explanation, feedback
+    │                           #   4. Classifies level: Weak / Average / Strong / Excellent
+    │                           #   5. Upserts the interaction into Pinecone memory
+    ├── embedding.py            # Converts text to vector embeddings (used by Pinecone)
+    ├── pinecone_service.py     # query_embeddings() / upsert_embeddings():
+    │                           #   manages the student's long-term vector memory
+    │                           #   (one namespace per student_id)
+    └── mock_ai.py              # Returns hardcoded questions/scores when
+                                #   AI_MOCK_MODE=true (for local dev without API keys)
+```
+
+---
+
+### `database/` — Data Layer
+
+Contains all SQLAlchemy models, repositories, and Alembic migration tooling. Shared by both `backend/` and `ai/`.
+
+```
+database/
+├── __init__.py
+├── base.py                 # Imports all models so that Base.metadata knows about
+│                           # every table (required for Alembic auto-generation)
+├── base_class.py           # Declares the SQLAlchemy DeclarativeBase used by all models
+├── config.py               # Reads DATABASE_URL from environment
+├── session.py              # Creates the SQLAlchemy engine and SessionLocal factory
+│                           # Also exposes get_db() — the FastAPI dependency that
+│                           # yields a DB session per request and closes it afterwards
+│
+├── models/                 # ORM table definitions
+│   ├── user_model.py       # User — id, name, email, password_hash, role,
+│   │                       #   auth_provider, google_id, profile_picture, is_active
+│   ├── interview_model.py  # InterviewSession — user_id, subject_id, mode, difficulty,
+│   │                       #   bloom_strategy, status, num_questions_requested/generated
+│   │                       # InterviewQuestion (junction) — links a session to a Question,
+│   │                       #   stores sequence_number and bloom_level_at_time
+│   │                       # Answer — links to InterviewQuestion, stores answer_text,
+│   │                       #   evaluation_score, feedback, ai_evaluation_metadata (JSONB)
+│   └── question_model.py   # Question — question_text, bloom_level, difficulty,
+│                           #   topic_tags (JSONB array), source_type (AI_GENERATED)
+│
+├── repositories/           # All SQL queries live here — no business logic
+│   ├── interview_repository.py # InterviewRepository singleton:
+│   │                           #   create_session / update_session_status / get_session_by_id
+│   │                           #   create_question / create_session_question_link
+│   │                           #   get_next_unanswered_question / get_question_link
+│   │                           #   save_answer / get_answers_for_session / get_answer_for_question
+│   └── user_repository.py      # UserRepository singleton:
+│                               #   create_user / get_user_by_email / get_user_by_id /
+│                               #   get_user_by_google_id
+│
+└── migrations/             # Alembic migration tooling
+    ├── alembic.ini         # Alembic configuration (script_location, DB URL pointer)
+    ├── env.py              # Migration environment — imports Base metadata, runs migrations
+    └── script.py.mako      # Template for auto-generated migration scripts
+```
+
+---
+
+## Detailed Request Flow
+
+This section traces every step a request takes through the system, from user action in the browser to database read/write and back.
+
+### 1. Authentication Flow
+
+```
+Browser (LoginPage.jsx)
+  │  user fills email + password, clicks "Login"
+  │
+  ▼
+useAuth() / AuthContext.login()
+  │  calls api.js → POST /api/v1/auth/login { email, password }
+  │  Axios interceptor attaches no token (unauthenticated endpoint)
+  │
+  ▼
+FastAPI  auth_routes.py  POST /auth/login
+  │  rate-limited: 5 requests / minute per IP
+  │  validates LoginRequest schema (Pydantic)
+  │
+  ▼
+auth_controller.handle_login(db, payload)
+  │  delegates to auth_service.login()
+  │  wraps result in success_response({ token, user })
+  │
+  ▼
+auth_service.login(db, payload)
+  │  calls user_repository.get_user_by_email()
+  │  verifies bcrypt password hash (security.py)
+  │  calls security.create_access_token() → signs JWT with SECRET_KEY
+  │  returns { token, user }
+  │
+  ▼
+HTTP 200 { success: true, data: { token: "...", user: {...} } }
+  │
+  ▼
+AuthContext.login() stores token in localStorage
+App.jsx navigates to /config
+```
+
+> Google OAuth follows the same path except the frontend sends the Google ID token to
+> `POST /auth/google` and `google_auth.py` verifies it before upserting the user.
+
+---
+
+### 2. Start Interview Flow
+
+```
+Browser (InterviewConfig.jsx)
+  │  user selects subject, difficulty, Bloom level, question count
+  │  clicks "Start Interview"
+  │
+  ▼
+useInterview.start(payload)
+  │  calls api.js → POST /api/v1/interview/start { subject, mode, difficulty, … }
+  │  Axios interceptor attaches Authorization: Bearer <token>
+  │
+  ▼
+FastAPI  interview_routes.py  POST /interview/start
+  │  rate-limited: 5 requests / minute per IP
+  │  validates InterviewStartRequest schema
+  │  get_current_user() dependency decodes JWT → extracts user_id (int)
+  │
+  ▼
+interview_controller.handle_start_interview(db, payload, user_id)
+  │
+  ▼
+interview_service.start_interview(db, payload, user_id)
+  │  1. user_repository.get_user_by_id() — verifies user exists
+  │  2. interview_repository.create_session() — inserts InterviewSession row (status="initializing")
+  │  3. Runs generate_questions() in a threadpool (non-blocking):
+  │     │
+  │     ▼
+  │    ai/services/question_generator.generate_questions(payload, student_id)
+  │     │  a. pinecone_service.query_embeddings() — fetches student's past interaction memory
+  │     │  b. Builds system + user prompt (subject, difficulty, Bloom, memory context)
+  │     │  c. groq_client.chat.completions.create() — LLM generates N questions as JSON
+  │     │  d. pinecone_service.upsert_embeddings() — stores each question in student memory
+  │     │  returns { questions: [ { question_text, bloom_level, difficulty, … } ] }
+  │     │
+  │  4. For each generated question:
+  │     a. interview_repository.create_question() — inserts Question row
+  │     b. interview_repository.create_session_question_link() — inserts InterviewQuestion row
+  │  5. interview_repository.update_session_status() — sets status="active"
+  │  6. db.commit()
+  │  returns { session_id, questions: [...] }
+  │
+  ▼
+HTTP 201 { session_id: 42, questions: [...] }
+  │
+  ▼
+useInterview stores session_id; App.jsx navigates to /interview
+```
+
+---
+
+### 3. Interview Q&A Loop
+
+```
+Browser (InterviewScreen.jsx)
+  │  on mount, calls useInterview.fetchNextQuestion(sessionId)
+  │
+  ▼
+api.js → GET /api/v1/interview/{id}/next
+  │
+  ▼
+interview_service.get_next_question(db, session_id, user_id)
+  │  interview_repository.get_next_unanswered_question()
+  │    — SQL: JOIN Question + InterviewQuestion LEFT JOIN Answer
+  │           WHERE Answer.id IS NULL  ORDER BY sequence_number ASC
+  │  returns { status: "in_progress", question_text, bloom_level, sequence, time_limit }
+  │  (or { status: "completed" } when all answered)
+  │
+  ▼
+QuestionCard.jsx renders the question + countdown timer
+User types their answer and clicks "Submit"
+  │
+  ▼
+useInterview.answer(interview_question_id, user_answer, sessionId)
+  │  calls api.js → POST /api/v1/interview/{id}/answer
+  │
+  ▼
+interview_service.submit_answer(db, session_id, body, user_id)
+  │  1. Validates session ownership and active status
+  │  2. interview_repository.get_question_link() — verifies question belongs to this session
+  │  3. interview_repository.get_answer_for_question() — guards duplicate submissions
+  │  4. interview_repository.save_answer() — inserts Answer row
+  │     (evaluation_score=NULL — AI scoring deferred to summary step)
+  │  5. get_next_unanswered_question() — if None, marks session "completed"
+  │  returns { score: null, feedback: null, is_complete: bool }
+  │
+  ▼
+If is_complete=false → fetchNextQuestion() loop repeats
+If is_complete=true  → fetchSummary() is called
+```
+
+---
+
+### 4. Results / Summary Flow
+
+```
+useInterview.fetchSummary(sessionId)
+  │  calls api.js → GET /api/v1/interview/{id}/summary
+  │
+  ▼
+interview_service.get_summary(db, session_id, user_id)
+  │  1. interview_repository.get_answers_for_session() — all Answer rows for this session
+  │  2. For each answer where evaluation_score IS NULL:
+  │     │
+  │     ▼
+  │    ai/services/check_answers.check_answer_correctness(question, answer, student_id)
+  │     │  a. pinecone_service.query_embeddings() — retrieves relevant past memory
+  │     │  b. Builds evaluation prompt (question + student answer)
+  │     │  c. llm_service.generate_response() → Groq returns JSON { score, explanation, feedback }
+  │     │  d. Classifies level: Weak / Average / Strong / Excellent
+  │     │  e. pinecone_service.upsert_embeddings() — stores this interaction in memory
+  │     │  returns { score, level, explanation, feedback }
+  │     │
+  │     Updates answer_record.evaluation_score / feedback / ai_evaluation_metadata
+  │  3. db.commit() — all scores persisted
+  │  4. Calculates average_score across all answers
+  │  5. Maps average to performance_level (Excellent / Strong / Average / Weak)
+  │  6. Marks session "completed" if not already
+  │  returns { average_score, performance_level, total_answered, breakdown: [...] }
+  │
+  ▼
+InterviewScreen.jsx renders score ring, performance badge, and per-question breakdown
+```
+
+---
+
+### 5. Data Flow Summary (Tables)
+
+```
+users ──────────────────────────────────────────────────────┐
+  id, name, email, password_hash, role, auth_provider, …    │
+                                                             │ user_id FK
+interview_sessions ──────────────────────────────────────── ▼
+  id, user_id, mode, difficulty, bloom_strategy,
+  num_questions_requested, num_questions_generated, status
+
+questions ──────────────────────────────────────────────────┐
+  id, question_text, bloom_level, difficulty, topic_tags     │
+                                                   │         │ question_id FK
+                                                   │         ▼
+interview_questions (junction) ─────────────────── ▼ ──────►  id, interview_session_id, question_id,
+                                                             sequence_number, bloom_level_at_time
+                                                                      │
+                                                                      │ interview_question_id FK
+                                                                      ▼
+answers ──────────────────────────────────────────────────────────────
+  id, interview_question_id, answer_text,
+  evaluation_score, feedback, ai_evaluation_metadata (JSONB)
 ```
 
 ---
